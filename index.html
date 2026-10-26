@@ -1,0 +1,871 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="description" content="Check a self-managed GitLab server for CVE-2026-110264 and scan its repositories for Org-mode payloads, straight from your browser.">
+<title>CVE-2026-110264 Checker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Sans+Condensed:wght@600;700&display=swap">
+<style>
+/* Layout: one narrow working column; verdict sits right under the input, then a numbered remediation path. */
+:root {
+  --bg: #f4f6f9; --surface: #ffffff; --fg: #16202c; --muted: #586476; --line: #d9dfe7;
+  --accent: #2753c9; --accent-soft: #e6ecfb; --code: #eef1f6;
+  --bad: #b93226; --bad-soft: #fbe9e7; --warn: #9a5c00; --warn-soft: #fdf1dc; --ok: #1d7448; --ok-soft: #e3f4ea;
+  --f-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0e131a; --surface: #151c26; --fg: #e5eaf1; --muted: #97a2b2; --line: #263142;
+  --accent: #7ea3ff; --accent-soft: #1b2643; --code: #0a0f15;
+  --bad: #ff7466; --bad-soft: #3a1714; --warn: #f2ae47; --warn-soft: #382709; --ok: #55c98f; --ok-soft: #0f2d1e;
+  color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #0e131a; --surface: #151c26; --fg: #e5eaf1; --muted: #97a2b2; --line: #263142;
+  --accent: #7ea3ff; --accent-soft: #1b2643; --code: #0a0f15;
+  --bad: #ff7466; --bad-soft: #3a1714; --warn: #f2ae47; --warn-soft: #382709; --ok: #55c98f; --ok-soft: #0f2d1e;
+  color-scheme: dark; }
+
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font: 15px/1.55 var(--f-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 28px 56px; }
+.wrap { max-width: 860px; margin: 0 auto; display: grid; gap: 22px; }
+h1, h2, h3 { font-family: var(--f-display); text-wrap: balance; margin: 0; line-height: 1.15; }
+h1 { font-size: clamp(1.7rem, 4.5vw, 2.4rem); letter-spacing: -0.01em; }
+h2 { font-size: 1.3rem; }
+h3 { font-size: 1.02rem; font-family: var(--f-body); font-weight: 600; }
+p { margin: 0; max-width: 68ch; }
+a { color: var(--accent); }
+code, pre, .mono { font-family: var(--f-mono); font-size: 0.86em; }
+.muted { color: var(--muted); }
+.eyebrow { font: 600 0.72rem/1 var(--f-body); letter-spacing: 0.09em; text-transform: uppercase; color: var(--muted); }
+
+header { display: grid; gap: 12px; }
+.facts { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line);
+  background: var(--surface); font-size: 0.82rem; font-variant-numeric: tabular-nums; }
+.chip.bad { border-color: transparent; background: var(--bad-soft); color: var(--bad); font-weight: 600; }
+
+section.step { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; display: grid; gap: 14px; min-width: 0; }
+.step-head { display: flex; gap: 12px; align-items: baseline; }
+.step-num { font: 700 0.95rem/1 var(--f-mono); color: var(--accent); min-width: 1.6em; }
+
+.tabs { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--line); }
+.tab { font: 500 0.9rem var(--f-body); background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted);
+  padding: 8px 12px; cursor: pointer; margin-bottom: -1px; }
+.tab[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+.tab:focus-visible, button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+textarea, select, input[type="text"], input[type="password"] { width: 100%; font: 0.9rem var(--f-mono); color: var(--fg); background: var(--code);
+  border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; }
+textarea { min-height: 92px; resize: vertical; }
+select { font-family: var(--f-body); }
+label.field { display: grid; gap: 6px; font-size: 0.85rem; font-weight: 500; }
+.row { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
+.row > * { flex: 1 1 200px; min-width: 0; }
+
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg button { font: 500 0.85rem var(--f-body); border: 0; background: var(--surface); color: var(--muted); padding: 8px 14px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+
+.btn { font: 600 0.9rem var(--f-body); background: var(--accent); color: var(--surface); border: 0; border-radius: 6px; padding: 9px 16px; cursor: pointer; }
+.btn.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+
+.code-block { position: relative; min-width: 0; }
+.code-block pre { margin: 0; background: var(--code); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; padding-right: 64px;
+  overflow-x: auto; white-space: pre; line-height: 1.5; }
+.copy { position: absolute; top: 6px; right: 6px; font: 500 0.75rem var(--f-body); background: var(--surface); color: var(--muted);
+  border: 1px solid var(--line); border-radius: 4px; padding: 3px 8px; cursor: pointer; }
+
+/* Verdict */
+.verdict { border-radius: 10px; padding: 20px; display: grid; gap: 12px; border: 1px solid var(--line); border-left-width: 6px; }
+.verdict.bad { background: var(--bad-soft); border-left-color: var(--bad); }
+.verdict.warn { background: var(--warn-soft); border-left-color: var(--warn); }
+.verdict.ok { background: var(--ok-soft); border-left-color: var(--ok); }
+.verdict .status { font: 700 clamp(1.4rem, 4vw, 1.9rem)/1.1 var(--f-display); }
+.verdict.bad .status { color: var(--bad); } .verdict.warn .status { color: var(--warn); } .verdict.ok .status { color: var(--ok); }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; font-size: 0.9rem; }
+.kv dt { color: var(--muted); } .kv dd { margin: 0; font-family: var(--f-mono); font-variant-numeric: tabular-nums; min-width: 0; overflow-wrap: anywhere; }
+.notes { margin: 0; padding-left: 1.1em; display: grid; gap: 6px; font-size: 0.92rem; }
+
+table { border-collapse: collapse; width: 100%; font-size: 0.88rem; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+th { font-weight: 600; color: var(--muted); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; }
+tr.current td { background: var(--accent-soft); }
+.table-wrap { overflow-x: auto; }
+
+.exposure { display: grid; gap: 10px; }
+.pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 0.78rem; font-weight: 600; }
+.pill.bad { background: var(--bad-soft); color: var(--bad); } .pill.ok { background: var(--ok-soft); color: var(--ok); } .pill.warn { background: var(--warn-soft); color: var(--warn); }
+
+.drop { border: 1.5px dashed var(--line); border-radius: 8px; padding: 18px; display: grid; gap: 10px; justify-items: start; }
+.drop.over { border-color: var(--accent); background: var(--accent-soft); }
+.results { font-size: 0.88rem; display: grid; gap: 6px; }
+.hit { font-family: var(--f-mono); font-size: 0.82rem; color: var(--bad); overflow-wrap: anywhere; }
+
+.checklist { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.checklist label { display: flex; gap: 10px; align-items: flex-start; padding: 8px 6px; border-radius: 6px; cursor: pointer; }
+.checklist label:hover { background: var(--code); }
+.checklist input { margin-top: 4px; accent-color: var(--accent); width: 16px; height: 16px; flex: none; }
+.checklist input:checked + span { color: var(--muted); text-decoration: line-through; }
+.progress { height: 6px; background: var(--code); border-radius: 99px; overflow: hidden; }
+.progress > div { height: 100%; background: var(--ok); width: 0; transition: width .25s; }
+
+details { border-top: 1px solid var(--line); padding-top: 10px; }
+summary { cursor: pointer; font-weight: 500; }
+footer { font-size: 0.82rem; color: var(--muted); display: grid; gap: 8px; }
+footer ul { margin: 0; padding-left: 1.1em; }
+.check { display: flex; gap: 8px; align-items: center; font-size: 0.88rem; }
+.check input { accent-color: var(--accent); width: 16px; height: 16px; }
+.btn[disabled] { opacity: .55; cursor: not-allowed; }
+.btn.stop { background: var(--bad); }
+.status-line { font-size: 0.88rem; font-variant-numeric: tabular-nums; }
+.log { font: 0.8rem/1.5 var(--f-mono); color: var(--muted); max-height: 180px; overflow: auto; background: var(--code);
+  border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.log .err { color: var(--bad); }
+.hit a { color: inherit; }
+.callout { font-size: 0.86rem; background: var(--accent-soft); border-radius: 6px; padding: 10px 12px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <span class="eyebrow">Self-managed GitLab · independent checker</span>
+    <h1>Is your GitLab server exposed to CVE-2026-110264?</h1>
+    <p class="muted">An integer overflow in Ruby's regex engine (Onigmo), reachable without login through GitLab's Org-mode (<code>.org</code>) renderer. Scan your server live or paste its version to get a verdict and the exact steps to fix it. This page is static: your token and results go only between your browser and your GitLab.</p>
+    <div class="facts">
+      <span class="chip bad">CVSS 10.0 · unauthenticated RCE</span>
+      <span class="chip">Fixed 21 Oct 2026</span>
+      <span class="chip">Affects 7.0 → 19.5.0</span>
+      <span class="chip">No official workaround</span>
+    </div>
+  </header>
+
+  <!-- 1. Identify -->
+  <section class="step" aria-labelledby="s1">
+    <div class="step-head"><span class="step-num">01</span><h2 id="s1">Identify your server</h2></div>
+    <div class="tabs" role="tablist">
+      <button class="tab" role="tab" id="tab-live" aria-selected="true" data-panel="panel-live">Scan live</button>
+      <button class="tab" role="tab" id="tab-paste" aria-selected="false" data-panel="panel-paste">Paste version</button>
+      <button class="tab" role="tab" id="tab-probe" aria-selected="false" data-panel="panel-probe">Run the probe script</button>
+      <button class="tab" role="tab" id="tab-where" aria-selected="false" data-panel="panel-where">Where do I find it?</button>
+    </div>
+
+    <div id="panel-live" role="tabpanel" class="exposure">
+      <form id="liveForm" class="exposure" autocomplete="off">
+        <div class="row">
+          <label class="field" for="glUrl">GitLab URL
+            <input type="text" id="glUrl" placeholder="https://gitlab.example.com" inputmode="url" spellcheck="false">
+          </label>
+          <label class="field" for="glToken"><span>Access token (<code>read_api</code> scope)</span>
+            <input type="password" id="glToken" placeholder="glpat-…" spellcheck="false">
+          </label>
+        </div>
+        <div class="row">
+          <label class="field" for="scanScope">Repositories to scan
+            <select id="scanScope">
+              <option value="public">Public projects only (the no-login path)</option>
+              <option value="all">Every project this token can see</option>
+              <option value="none">None, just version and exposure</option>
+            </select>
+          </label>
+          <label class="field" for="scanRefs">Branches
+            <select id="scanRefs">
+              <option value="default">Default branch (fast)</option>
+              <option value="all">All branches</option>
+            </select>
+          </label>
+        </div>
+        <label class="check" for="scanWikis"><input type="checkbox" id="scanWikis" checked> Also scan project wikis (they render Org too)</label>
+        <div class="row" style="align-items:center">
+          <button type="submit" class="btn" id="liveRun" style="flex:none">Run check</button>
+          <span class="status-line muted" id="liveStatus">Requests go from your browser straight to your server. The token is never saved.</span>
+        </div>
+      </form>
+      <div class="results" id="liveResults"></div>
+      <pre class="log" id="liveLog" hidden></pre>
+      <p class="callout">Your server must use <b>https</b> (this page is https). If it is only reachable on your office network or VPN, connect first; your browser may ask to allow access to local network devices. Use an admin token to scan every project; a normal user token only sees projects that user can see. Create a short-lived token and revoke it afterwards.</p>
+    </div>
+
+    <div id="panel-paste" role="tabpanel" class="exposure" hidden>
+      <label class="field" for="versionInput"><span>Version, or anything that contains it (VERSION file, /help page, API JSON, probe output)</span>
+        <textarea id="versionInput" spellcheck="false">19.4.2-ee</textarea>
+      </label>
+    </div>
+    <p class="muted" id="exampleNote" style="font-size:.82rem">The verdict below shows an example (19.4.2-ee, the 12 October patch) until you scan or paste your own.</p>
+
+    <div id="panel-probe" role="tabpanel" hidden class="exposure">
+      <p>Run this from any machine that can reach your GitLab. It is read-only. Paste its two output lines into <em>Paste version</em>; the checker also reads whether anonymous visitors can see public projects.</p>
+      <div class="code-block"><pre id="probeScript"></pre><button class="copy" data-copy="probeScript">Copy</button></div>
+      <p class="muted" style="font-size:.82rem">The token needs the <code>read_api</code> scope. The second request is sent without a token on purpose: it shows what an attacker without an account can see.</p>
+    </div>
+
+    <div id="panel-where" role="tabpanel" hidden class="exposure">
+      <div class="table-wrap"><table>
+        <thead><tr><th>Install type</th><th>Command</th></tr></thead>
+        <tbody>
+          <tr><td>Linux package (Omnibus)</td><td><code>sudo cat /opt/gitlab/embedded/service/gitlab-rails/VERSION</code></td></tr>
+          <tr><td>Docker</td><td><code>docker exec &lt;container&gt; cat /opt/gitlab/embedded/service/gitlab-rails/VERSION</code></td></tr>
+          <tr><td>Helm chart</td><td><code>helm list -A | grep -i gitlab</code> → read <b>APP VERSION</b>, not the chart version</td></tr>
+          <tr><td>Browser</td><td>Sign in, open <code>/help</code></td></tr>
+        </tbody>
+      </table></div>
+      <p class="muted" style="font-size:.85rem">List every instance: production, Geo secondaries, staging, disaster recovery and test servers. A forgotten one is still a way in.</p>
+    </div>
+
+    <div class="row">
+      <label class="field">Edition
+        <span class="seg" role="group" aria-label="Edition">
+          <button type="button" id="ed-ee" data-ed="ee" aria-pressed="true">Enterprise (EE)</button>
+          <button type="button" id="ed-ce" data-ed="ce" aria-pressed="false">Community (CE)</button>
+        </span>
+      </label>
+      <label class="field" for="installType">Install type
+        <select id="installType">
+          <option value="deb">Linux package · Debian / Ubuntu</option>
+          <option value="rpm">Linux package · RHEL / Rocky / Alma</option>
+          <option value="docker">Docker / Docker Compose</option>
+          <option value="helm">Helm chart (Kubernetes)</option>
+        </select>
+      </label>
+      <label class="field" for="publicProjects">Public projects on this server?
+        <select id="publicProjects">
+          <option value="unknown">Not sure</option>
+          <option value="yes">Yes, at least one</option>
+          <option value="no">No public projects</option>
+        </select>
+      </label>
+    </div>
+  </section>
+
+  <!-- 2. Verdict -->
+  <div id="verdict" class="verdict" aria-live="polite"></div>
+
+  <!-- 3. Fix -->
+  <section class="step" aria-labelledby="s3">
+    <div class="step-head"><span class="step-num">02</span><h2 id="s3">Patch it</h2></div>
+    <div id="fixBody" class="exposure"></div>
+    <details>
+      <summary>Fixed version for every release line</summary>
+      <div class="table-wrap" style="margin-top:10px"><table>
+        <thead><tr><th>You run</th><th>Upgrade to</th><th>Includes</th></tr></thead>
+        <tbody id="fixTable"></tbody>
+      </table></div>
+    </details>
+  </section>
+
+  <!-- 4. Reduce exposure -->
+  <section class="step" aria-labelledby="s4">
+    <div class="step-head"><span class="step-num">03</span><h2 id="s4">Close the anonymous path until you patch</h2></div>
+    <p>The unauthenticated attack needs one <b>public</b> project holding a crafted <code>.org</code> file for GitLab to render. Hiding public projects narrows the attack. It does not fix it: signed-in users can still reach the renderer.</p>
+    <ol class="notes">
+      <li><b>Admin area → Settings → General → Visibility and access controls → Restricted visibility levels</b>: tick <i>Public</i> so no one can create new public projects.</li>
+      <li>Change existing public projects to <i>Internal</i> or <i>Private</i>. List them with:</li>
+    </ol>
+    <div class="code-block"><pre id="listPublic"></pre><button class="copy" data-copy="listPublic">Copy</button></div>
+  </section>
+
+  <!-- 5. Scan -->
+  <section class="step" aria-labelledby="s5">
+    <div class="step-head"><span class="step-num">04</span><h2 id="s5">Look for planted payloads</h2></div>
+    <p>A payload is a <code>#+TODO:</code> (or <code>SEQ_TODO</code> / <code>TYP_TODO</code>) line with a huge keyword; the overflow needs over 32,767 repeats. Anything over 500 characters is worth a look. Every scan here matches upper or lower case and indented lines, which is broader than GitLab's own published check.</p>
+
+    <h3>On the server: branches, tags and merge request refs of every repository, wiki and snippet</h3>
+    <div class="code-block"><pre id="serverScan"></pre><button class="copy" data-copy="serverScan">Copy</button></div>
+    <p class="muted" style="font-size:.85rem">For Docker, run it inside the container (<code>docker exec -it &lt;container&gt; bash</code>, then drop <code>sudo</code>). Gitaly Cluster stores repositories on the Gitaly nodes; run it there. It can take a while on large instances.</p>
+
+    <h3>In a checkout you already have</h3>
+    <div class="code-block"><pre id="rgScan"></pre><button class="copy" data-copy="rgScan">Copy</button></div>
+
+    <h3>Or drop a folder here</h3>
+    <div class="drop" id="drop">
+      <p>Drag a repository folder or <code>.org</code> files here. They are read in this tab only.</p>
+      <div class="row" style="gap:8px">
+        <label class="btn ghost" for="pickDir" style="flex:none">Choose folder</label>
+        <input type="file" id="pickDir" webkitdirectory multiple hidden>
+        <label class="btn ghost" for="pickFiles" style="flex:none">Choose files</label>
+        <input type="file" id="pickFiles" accept=".org" multiple hidden>
+      </div>
+      <div class="results" id="scanResults"></div>
+    </div>
+  </section>
+
+  <!-- 6. Detect -->
+  <section class="step" aria-labelledby="s6">
+    <div class="step-head"><span class="step-num">05</span><h2 id="s6">Check logs for attempts</h2></div>
+    <p>GitLab published two Sigma rules for this flaw in its open-source <a href="https://gitlab.com/gitlab-security-oss/tldr" target="_blank" rel="noopener">TLDR repository</a>: <b>Org mode render error burst</b> (5+ Org-mode render timeouts from one client within 30 minutes, in <code>exceptions_json.log</code>) and <b>Onigmo native worker crash</b> (in <code>puma_stderr.log</code>). Load them into your log tool. For a quick manual look:</p>
+    <div class="code-block"><pre id="logScan"></pre><button class="copy" data-copy="logScan">Copy</button></div>
+    <p class="muted" style="font-size:.85rem">A successful exploit can be quiet and does not always crash a worker, so a clean log is not proof. A crash is a reason to investigate, not proof of compromise.</p>
+  </section>
+
+  <!-- 7. Checklist -->
+  <section class="step" aria-labelledby="s7">
+    <div class="step-head"><span class="step-num">06</span><h2 id="s7">Your checklist</h2></div>
+    <div class="progress" aria-hidden="true"><div id="progressBar"></div></div>
+    <ul class="checklist" id="checklist"></ul>
+    <button class="btn ghost" id="resetChecklist" style="justify-self:start">Clear checklist</button>
+  </section>
+
+  <footer>
+    <p>Independent tool, not made by GitLab. Based on public information as of 26 October 2026: no attacks reported yet, crash proofs of concept public since 22 October. GitLab plans to publish full issue details in January 2027.</p>
+    <ul>
+      <li><a href="https://docs.gitlab.com/releases/patches/patch-release-gitlab-19-5-1-released/" target="_blank" rel="noopener">GitLab patch release 19.5.1 (21 Oct 2026)</a></li>
+      <li><a href="https://gitlab.com/gitlab-security-oss/tldr/-/blob/main/Detections/platforms/GitLab/Vulnerability%20Detections/org_mode_render_error_burst.md" target="_blank" rel="noopener">GitLab detection rule: Org mode render error burst</a></li>
+      <li><a href="https://www.ruby-lang.org/en/news/2026/10/23/regexp-fixes-for-gitlab-cves/" target="_blank" rel="noopener">Ruby regex fixes (23 Oct 2026)</a></li>
+      <li><a href="https://gitlab-com.gitlab.io/support/toolbox/upgrade-path/" target="_blank" rel="noopener">GitLab upgrade path tool</a></li>
+      <li><a href="https://www.konfirmity.com/advisories/gitlab-critical-patch-release-19-5-1" target="_blank" rel="noopener">Konfirmity advisory</a></li>
+    </ul>
+  </footer>
+</div>
+
+<script>
+/* ---------- Data ---------- */
+const FIX_LINES = [
+  { line: "19.5",  fixed: "19.5.1",   allFixes: true,  migrations: false },
+  { line: "19.4",  fixed: "19.4.3",   allFixes: true,  migrations: true  },
+  { line: "19.3",  fixed: "19.3.6",   allFixes: true,  migrations: true  },
+  { line: "19.2",  fixed: "19.2.9",   allFixes: false, migrations: false },
+  { line: "19.1",  fixed: "19.1.9",   allFixes: false, migrations: false },
+  { line: "19.0",  fixed: "19.0.10",  allFixes: false, migrations: false },
+  { line: "18.11", fixed: "18.11.13", allFixes: false, migrations: false },
+];
+const FIRST_AFFECTED = "7.0.0";
+const OLDEST_FIXED_LINE = "18.11.0";
+const LATEST_FIX = "19.5.1";
+const OCT12_RELEASES = new Set(["19.4.2", "19.3.4", "19.3.5", "19.2.8"]);
+
+/* ---------- Pure helpers ---------- */
+const toParts = (v) => v.split(".").map(Number);
+function compareVersions(a, b) {
+  const [x, y] = [toParts(a), toParts(b)];
+  for (let i = 0; i < 3; i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return Math.sign(d); }
+  return 0;
+}
+
+function parseVersion(text) {
+  const jsonVersion = text.match(/"version"\s*:\s*"([^"]+)"/);
+  const source = jsonVersion ? jsonVersion[1] : text;
+  const m = source.match(/(\d{1,2})\.(\d{1,2})\.(\d{1,3})(?:-(ee|ce))?/i);
+  if (!m) return null;
+  let edition = m[4] ? m[4].toLowerCase() : null;
+  const ent = text.match(/"enterprise"\s*:\s*(true|false)/);
+  if (ent) edition = ent[1] === "true" ? "ee" : "ce";
+  return { version: `${+m[1]}.${+m[2]}.${+m[3]}`, line: `${+m[1]}.${+m[2]}`, edition };
+}
+
+function parseExposure(text) {
+  const m = text.match(/ANON_PUBLIC_SAMPLE=(.*)/);
+  if (!m) return null;
+  const body = m[1].trim();
+  if (body.startsWith("[{")) return "yes";
+  if (body.startsWith("[]")) return "no";
+  return null;
+}
+
+/** Returns { level: bad|warn|ok, status, target, notes[], migrations } */
+function assess(version) {
+  const line = version.split(".").slice(0, 2).join(".");
+  const notes = [];
+  if (compareVersions(version, FIRST_AFFECTED) < 0) {
+    return { level: "warn", status: "Not affected by this CVE, but unsupported", target: LATEST_FIX, multiStep: true,
+      notes: ["Versions before 7.0 predate this flaw, but they are years out of support and carry many other known vulnerabilities. Plan a full upgrade."] };
+  }
+  if (compareVersions(version, OLDEST_FIXED_LINE) < 0) {
+    return { level: "bad", status: "Affected · no patch for your version", target: LATEST_FIX, multiStep: true,
+      notes: ["GitLab released no fix for 18.10 or older. You need to upgrade to 18.11.13 or later, which usually means several required upgrade stops.",
+              "Use the upgrade path tool to plan the stops, and aim for 19.5.1 so you also get the 11 other fixes."] };
+  }
+  const fix = FIX_LINES.find((f) => f.line === line);
+  if (!fix) {
+    return { level: "ok", status: "Not affected", target: null,
+      notes: [`${line} was released after the 21 October fix, so it already includes it.`] };
+  }
+  if (OCT12_RELEASES.has(version)) {
+    notes.push("This looks like the 12 October patch. That release fixed a different regex flaw (CVE-2026-97229, reached through CI/CD config). It does not fix this one.");
+  }
+  if (compareVersions(version, fix.fixed) < 0) {
+    notes.push(`Stay on your ${line} line and move to ${fix.fixed}. A patch upgrade needs no extra upgrade stops.`);
+    if (fix.migrations) notes.push(`${fix.fixed} runs database migrations. A single-node server is down until they finish.`);
+    if (!fix.allFixes) notes.push(`${fix.fixed} carries only the critical fix. The 11 other fixes from the same release (two rated high) need 19.3.6 or later.`);
+    return { level: "bad", status: "Affected · patch now", target: fix.fixed, migrations: fix.migrations, notes };
+  }
+  if (!fix.allFixes) {
+    return { level: "warn", status: "Patched for this CVE", target: null,
+      notes: ["You have the critical fix. The 11 other fixes from the 21 October release (including an LDAP account takeover and an OAuth cache poisoning bug) need 19.3.6, 19.4.3 or 19.5.1. Plan that move."] };
+  }
+  return { level: "ok", status: "Patched", target: null, notes: ["You are on a release that includes this fix and the 11 others from 21 October."] };
+}
+
+function upgradeCommands(target, edition, install) {
+  const e = edition;
+  switch (install) {
+    case "deb": return [
+      "# 1. Back up first (data, then config and secrets)",
+      "sudo gitlab-backup create",
+      "sudo cp /etc/gitlab/gitlab.rb /etc/gitlab/gitlab-secrets.json ~/",
+      "",
+      "# 2. Install the fixed package",
+      "sudo apt-get update",
+      `sudo apt-get install gitlab-${e}=${target}-${e}.0`,
+      "",
+      "# 3. Confirm",
+      "sudo cat /opt/gitlab/embedded/service/gitlab-rails/VERSION",
+    ];
+    case "rpm": return [
+      "# 1. Back up first (data, then config and secrets)",
+      "sudo gitlab-backup create",
+      "sudo cp /etc/gitlab/gitlab.rb /etc/gitlab/gitlab-secrets.json ~/",
+      "",
+      "# 2. Install the fixed package",
+      `sudo dnf install gitlab-${e}-${target}-${e}.0.el$(rpm -E %rhel)`,
+      "",
+      "# 3. Confirm",
+      "sudo cat /opt/gitlab/embedded/service/gitlab-rails/VERSION",
+    ];
+    case "docker": return [
+      "# 1. Back up first",
+      "docker exec -t <container> gitlab-backup create",
+      "",
+      "# 2. Pull the fixed image",
+      `docker pull gitlab/gitlab-${e}:${target}-${e}.0`,
+      "",
+      "# 3a. Docker Compose: set this image tag in compose.yaml, then",
+      `#     image: gitlab/gitlab-${e}:${target}-${e}.0`,
+      "docker compose up -d",
+      "",
+      "# 3b. Plain docker run: stop, remove and re-run the container",
+      "#     with the same volumes and the new image tag",
+      "",
+      "# 4. Confirm",
+      "docker exec <container> cat /opt/gitlab/embedded/service/gitlab-rails/VERSION",
+    ];
+    case "helm": return [
+      "# 1. Find the chart version whose APP VERSION is the fixed release",
+      "helm repo update",
+      `helm search repo gitlab/gitlab --versions | grep -w "v\\?${target}"`,
+      "",
+      "# 2. Upgrade (replace <chart-version> and <release>)",
+      "helm upgrade <release> gitlab/gitlab --version <chart-version> --reuse-values",
+      "",
+      "# If you pin global.gitlabVersion in your values, update it too:",
+      `#   global.gitlabVersion: ${target}`,
+    ];
+  }
+  return [];
+}
+
+/* ---------- Static scripts ---------- */
+const SCRIPTS = {
+  probeScript: [
+    "#!/usr/bin/env bash",
+    "# Read-only probe for CVE-2026-110264",
+    'GITLAB="https://gitlab.example.com"   # your server URL',
+    'TOKEN="glpat-xxxxxxxx"                # token with read_api scope',
+    "",
+    'echo "VERSION_JSON=$(curl -fsS -H "PRIVATE-TOKEN: $TOKEN" "$GITLAB/api/v4/version")"',
+    'echo "ANON_PUBLIC_SAMPLE=$(curl -fsS "$GITLAB/api/v4/projects?visibility=public&per_page=1&simple=true" | head -c 120)"',
+  ],
+  listPublic: [
+    'GITLAB="https://gitlab.example.com"',
+    'TOKEN="glpat-xxxxxxxx"   # admin token sees all public projects',
+    "",
+    'for page in $(seq 1 50); do',
+    '  out=$(curl -fsS -H "PRIVATE-TOKEN: $TOKEN" \\',
+    '    "$GITLAB/api/v4/projects?visibility=public&simple=true&per_page=100&page=$page")',
+    '  [ "$out" = "[]" ] && break',
+    "  echo \"$out\" | jq -r '.[].path_with_namespace'",
+    "done",
+  ],
+  serverScan: [
+    "# Linux package defaults. Read-only. Case-insensitive, allows indentation.",
+    "REPOS=/var/opt/gitlab/git-data/repositories",
+    "GIT=/opt/gitlab/embedded/bin/git",
+    "PATTERN='^[[:space:]]*#\\+(TODO|SEQ_TODO|TYP_TODO):.{500,}'",
+    "",
+    "sudo find \"$REPOS\" -type d -name '*.git' -prune | while read -r repo; do",
+    "  sudo -u git \"$GIT\" -C \"$repo\" for-each-ref --format='%(objectname)' \\",
+    "      refs/heads refs/tags refs/merge-requests | sort -u \\",
+    "    | xargs -r -n 200 sudo -u git \"$GIT\" -C \"$repo\" grep -l -i -E \"$PATTERN\" -- '*.org' '*.ORG' 2>/dev/null \\",
+    "    | sed 's|^[0-9a-f]*:||' | sort -u | sed \"s|^|$repo  |\"",
+    "done",
+    "",
+    "# Map a hashed path (@hashed/ab/cd/<hash>) back to its project:",
+    "# sudo gitlab-rails runner 'puts ProjectRepository.find_by(disk_path: \"@hashed/ab/cd/<hash>\")&.project&.full_path'",
+  ],
+  rgScan: [
+    "rg -l -i --glob '**/*.org' '^\\s*\\#\\+(TODO|SEQ_TODO|TYP_TODO):.{500,}'",
+  ],
+  logScan: [
+    "# Org-mode render timeouts (look for bursts from one client)",
+    "sudo grep -i 'org' /var/log/gitlab/gitlab-rails/exceptions_json.log | grep -i 'timeout' | tail -n 20",
+    "",
+    "# Worker crashes inside the regex engine",
+    "sudo grep -i -E 'onig|segmentation fault' /var/log/gitlab/puma/puma_stderr.log | tail -n 20",
+  ],
+};
+
+const CHECKLIST = [
+  ["inventory", "List every GitLab server: production, Geo secondaries, staging, DR, test"],
+  ["version", "Check the version of each one with this tool"],
+  ["backup", "Take a backup and copy gitlab.rb and gitlab-secrets.json"],
+  ["upgrade", "Install the fixed release for each server"],
+  ["verify", "Confirm the new version on each server"],
+  ["visibility", "Restrict or remove public projects until every server is patched"],
+  ["scan", "Scan repositories and wikis for oversized #+TODO: lines"],
+  ["rules", "Load GitLab's two TLDR detection rules and run them over recent logs"],
+  ["rotate", "If anything looks wrong: treat the server as compromised and rotate CI/CD variables, runner tokens, deploy keys and access tokens"],
+  ["ruby", "Patch other Ruby apps that build regexes from user input (Ruby 4.0.9, 3.4.12, 3.3.13)"],
+];
+
+/* ---------- State ---------- */
+const state = { edition: "ee", install: "deb", exposure: "unknown", editionTouched: false };
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(k, fallback) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fallback; } catch { return fallback; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+/* ---------- Rendering ---------- */
+function renderVerdict(parsed, result) {
+  const box = $("verdict");
+  if (!parsed) {
+    box.className = "verdict warn";
+    box.innerHTML = `<span class="eyebrow">Verdict</span><div class="status">No version found</div>
+      <p>Paste something like <code>19.4.2-ee</code>, the contents of the VERSION file, or the probe output.</p>`;
+    return;
+  }
+  const exposureText = {
+    yes: '<span class="pill bad">Public projects visible without login</span> The unauthenticated path is open.',
+    no: '<span class="pill ok">No public projects</span> The anonymous path is closed; signed-in users can still reach the renderer.',
+    unknown: '<span class="pill warn">Public projects unknown</span> Run the probe or check Admin area → Projects.',
+  }[state.exposure];
+  const urgent = result.level === "bad" && state.exposure === "yes";
+  box.className = `verdict ${result.level}`;
+  box.innerHTML = `
+    <span class="eyebrow">Verdict</span>
+    <div class="status">${esc(result.status)}${urgent ? " · exposed to anyone" : ""}</div>
+    <dl class="kv">
+      <dt>Detected</dt><dd>${esc(parsed.version)}${parsed.edition ? "-" + parsed.edition : ""}</dd>
+      <dt>Fixed release</dt><dd>${result.target ? esc(result.target) : "—"}</dd>
+    </dl>
+    ${result.level !== "ok" || state.exposure === "yes" ? `<p>${exposureText}</p>` : ""}
+    <ul class="notes">${result.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>`;
+}
+
+function renderFix(parsed, result) {
+  const body = $("fixBody");
+  if (!parsed || !result.target) {
+    body.innerHTML = parsed
+      ? `<p>No upgrade needed for this CVE. Keep watching GitLab's patch releases, and still run the payload scan and log check below if your server was unpatched at any point after 21 October.</p>`
+      : `<p class="muted">Enter a version above to get the commands.</p>`;
+    return;
+  }
+  const lines = upgradeCommands(result.target, state.edition, state.install);
+  const multi = result.multiStep
+    ? `<p><b>Plan your upgrade stops first</b> with the <a href="https://gitlab-com.gitlab.io/support/toolbox/upgrade-path/" target="_blank" rel="noopener">upgrade path tool</a>. Run the commands below once per stop, ending at ${esc(result.target)}.</p>` : "";
+  body.innerHTML = `${multi}
+    <p>Target: <b class="mono">${esc(result.target)}-${state.edition}</b> for ${esc($("installType").selectedOptions[0].textContent)}.</p>
+    <div class="code-block"><pre id="upgradeCmds">${esc(lines.join("\n"))}</pre><button class="copy" data-copy="upgradeCmds">Copy</button></div>`;
+}
+
+function renderFixTable(parsed) {
+  const current = parsed && parsed.line;
+  $("fixTable").innerHTML = FIX_LINES.map((f) => `
+    <tr class="${f.line === current ? "current" : ""}"><td>${f.line}</td><td class="mono">${f.fixed}</td>
+    <td>${f.allFixes ? "All 12 fixes" : "Critical fix only"}${f.migrations ? " · DB migrations" : ""}</td></tr>`).join("")
+    + `<tr class="${current && compareVersions(current + ".0", OLDEST_FIXED_LINE) < 0 ? "current" : ""}"><td>18.10 and older</td><td>No fix</td><td>Upgrade to a supported line</td></tr>`;
+}
+
+function renderChecklist() {
+  const done = store.get("cve110264-checklist", {});
+  $("checklist").innerHTML = CHECKLIST.map(([id, text]) => `
+    <li><label for="ck-${id}"><input type="checkbox" id="ck-${id}" data-id="${id}" ${done[id] ? "checked" : ""}><span>${esc(text)}</span></label></li>`).join("");
+  updateProgress();
+}
+function updateProgress() {
+  const boxes = [...document.querySelectorAll("#checklist input")];
+  const pct = boxes.length ? (boxes.filter((b) => b.checked).length / boxes.length) * 100 : 0;
+  $("progressBar").style.width = pct + "%";
+}
+
+function setEdition(ed) {
+  state.edition = ed;
+  document.querySelectorAll("[data-ed]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.ed === ed)));
+}
+
+function update() {
+  const text = $("versionInput").value;
+  const parsed = parseVersion(text);
+  const exposure = parseExposure(text);
+  if (exposure) { state.exposure = exposure; $("publicProjects").value = exposure; }
+  if (parsed && parsed.edition && !state.editionTouched) setEdition(parsed.edition);
+  const result = parsed ? assess(parsed.version) : null;
+  renderVerdict(parsed, result);
+  renderFix(parsed, result || {});
+  renderFixTable(parsed);
+}
+
+/* ---------- Local .org scanner ---------- */
+const PAYLOAD = /^[ \t]*#\+(TODO|SEQ_TODO|TYP_TODO):.{500,}/i;
+/** Returns [{ line, len }] for every suspicious line in an Org document. */
+function findPayloadLines(text) {
+  const hits = [];
+  text.split(/\r?\n/).forEach((l, i) => { if (PAYLOAD.test(l)) hits.push({ line: i + 1, len: l.length }); });
+  return hits;
+}
+async function scanFiles(fileList) {
+  const files = [...fileList].filter((f) => f.name.toLowerCase().endsWith(".org") && f.size < 50 * 1024 * 1024);
+  const out = $("scanResults");
+  if (!files.length) { out.innerHTML = `<p class="muted">No .org files found in that selection.</p>`; return; }
+  const hits = [];
+  for (const f of files) {
+    findPayloadLines(await f.text()).forEach((h) => hits.push({ path: f.webkitRelativePath || f.name, ...h }));
+  }
+  out.innerHTML = hits.length
+    ? `<p><span class="pill bad">${hits.length} suspicious line${hits.length > 1 ? "s" : ""}</span> in ${files.length} .org file${files.length > 1 ? "s" : ""}:</p>`
+      + hits.map((h) => `<div class="hit">${esc(h.path)}:${h.line} · ${h.len.toLocaleString()} chars</div>`).join("")
+    : `<p><span class="pill ok">Clean</span> ${files.length} .org file${files.length > 1 ? "s" : ""} scanned, no oversized TODO lines.</p>`;
+}
+
+/* ---------- Live scan via the GitLab REST API ---------- */
+class GitLabError extends Error {
+  constructor(message, status) { super(message); this.status = status; }
+}
+
+/** Minimal GitLab API client. CORS is allowed on /api/* by GitLab for any origin. */
+function gitlabClient(baseUrl, token, signal) {
+  const root = baseUrl.replace(/\/+$/, "") + "/api/v4";
+  async function request(path, { auth = true, as = "json" } = {}) {
+    let res;
+    try {
+      res = await fetch(root + path, { headers: auth && token ? { "PRIVATE-TOKEN": token } : {}, signal, credentials: "omit" });
+    } catch (e) {
+      if (e.name === "AbortError") throw e;
+      throw new GitLabError("Could not reach the server (network, https or CORS problem)", 0);
+    }
+    if (!res.ok) throw new GitLabError(`HTTP ${res.status} on ${path.split("?")[0]}`, res.status);
+    return as === "text" ? res.text() : res.json();
+  }
+  async function all(path, opts) {
+    const out = [];
+    const sep = path.includes("?") ? "&" : "?";
+    for (let page = 1; ; page++) {
+      const items = await request(`${path}${sep}per_page=100&page=${page}`, opts);
+      out.push(...items);
+      if (items.length < 100) return out;
+    }
+  }
+  return { request, all };
+}
+
+async function runPool(items, limit, worker) {
+  let next = 0;
+  const lane = async () => { while (next < items.length) await worker(items[next++]); };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane));
+}
+
+const enc = encodeURIComponent;
+
+async function scanProject(api, project, opts, report) {
+  const id = project.id;
+  if (!project.default_branch) return;
+  const refs = opts.allBranches
+    ? (await api.all(`/projects/${id}/repository/branches`)).map((b) => b.name)
+    : [project.default_branch];
+  for (const ref of refs) {
+    let tree;
+    try { tree = await api.all(`/projects/${id}/repository/tree?recursive=true&ref=${enc(ref)}`); }
+    catch (e) { if (e.status === 404) continue; throw e; }
+    const orgFiles = tree.filter((t) => t.type === "blob" && /\.org$/i.test(t.path));
+    for (const file of orgFiles) {
+      const text = await api.request(`/projects/${id}/repository/files/${enc(file.path)}/raw?ref=${enc(ref)}`, { as: "text" });
+      report.orgFiles++;
+      findPayloadLines(text).forEach((h) => report.hits.push({
+        where: `${project.path_with_namespace} @ ${ref}`, path: file.path, ...h,
+        url: `${project.web_url}/-/blob/${enc(ref)}/${file.path.split("/").map(enc).join("/")}#L${h.line}`,
+      }));
+    }
+  }
+  if (opts.wikis) {
+    let pages = [];
+    try { pages = await api.request(`/projects/${id}/wikis?with_content=1`); }
+    catch (e) { if (![403, 404].includes(e.status)) throw e; }
+    for (const p of pages.filter((pg) => pg.format === "org")) {
+      report.orgFiles++;
+      findPayloadLines(p.content || "").forEach((h) => report.hits.push({
+        where: `${project.path_with_namespace} (wiki)`, path: p.slug, ...h, url: `${project.web_url}/-/wikis/${p.slug}`,
+      }));
+    }
+  }
+}
+
+const live = { controller: null };
+
+function liveLog(msg, isError = false) {
+  const log = $("liveLog");
+  log.hidden = false;
+  const line = document.createElement("div");
+  if (isError) line.className = "err";
+  line.textContent = msg;
+  log.appendChild(line);
+  log.scrollTop = log.scrollHeight;
+}
+
+function renderLiveReport(report, done) {
+  const { scanned, total, orgFiles, hits, errors } = report;
+  const head = total === null ? "" : `Projects ${scanned}/${total} · .org files ${orgFiles} · errors ${errors}`;
+  $("liveStatus").textContent = done ? `Done. ${head}` : head || "Working…";
+  const verdict = !done ? "" : hits.length
+    ? `<p><span class="pill bad">${hits.length} suspicious line${hits.length > 1 ? "s" : ""} found</span> Treat these projects as hostile until reviewed.</p>`
+    : total ? `<p><span class="pill ok">No payloads found</span> in ${orgFiles} .org file${orgFiles === 1 ? "" : "s"} across ${scanned} project${scanned === 1 ? "" : "s"}.</p>` : "";
+  $("liveResults").innerHTML = verdict + hits.map((h) =>
+    `<div class="hit"><a href="${esc(h.url)}" target="_blank" rel="noopener noreferrer">${esc(h.where)} · ${esc(h.path)}:${h.line}</a> · ${h.len.toLocaleString()} chars</div>`).join("");
+}
+
+function explainError(e, base) {
+  if (e.status === 401) return "The token was rejected. Check it is valid and has the read_api scope.";
+  if (e.status === 403) return "The token is not allowed to read this. Use a token with the read_api scope.";
+  if (e.status === 0) {
+    if (location.protocol === "https:" && base.startsWith("http:")) return "Your server uses http. Browsers block http requests from an https page. Use the probe script instead.";
+    return "Could not reach the server. Check the URL, that you are on the right network or VPN, and that your browser allowed local network access. Otherwise use the probe script.";
+  }
+  return e.message;
+}
+
+async function runLiveScan(event) {
+  event.preventDefault();
+  if (live.controller) { live.controller.abort(); return; }
+  const base = $("glUrl").value.trim().replace(/\/+$/, "");
+  const token = $("glToken").value.trim();
+  if (!/^https?:\/\/[^\s/]+/i.test(base)) { $("liveStatus").textContent = "Enter the full URL, starting with https://"; return; }
+  if (!token) { $("liveStatus").textContent = "Enter an access token with the read_api scope."; return; }
+
+  live.controller = new AbortController();
+  const api = gitlabClient(base, token, live.controller.signal);
+  const report = { scanned: 0, total: null, orgFiles: 0, hits: [], errors: 0 };
+  $("liveRun").textContent = "Stop";
+  $("liveRun").classList.add("stop");
+  $("liveLog").textContent = "";
+  $("liveResults").innerHTML = "";
+  $("liveStatus").textContent = "Reading version…";
+
+  try {
+    const version = await api.request("/version");
+    liveLog(`Version: ${version.version}`);
+    let sample = "unknown";
+    try {
+      const anon = await api.request("/projects?visibility=public&per_page=1&simple=true", { auth: false });
+      sample = anon.length ? "[{" : "[]";
+      liveLog(anon.length ? "Anonymous visitors CAN see public projects" : "Anonymous visitors see no public projects");
+    } catch (e) { liveLog(`Anonymous check failed: ${explainError(e, base)}`, true); }
+    $("versionInput").value = `VERSION_JSON=${JSON.stringify(version)}\nANON_PUBLIC_SAMPLE=${sample}`;
+    $("exampleNote").hidden = true;
+    update();
+
+    const scope = $("scanScope").value;
+    if (scope !== "none") {
+      $("liveStatus").textContent = "Listing projects…";
+      const filter = scope === "public" ? "&visibility=public" : "";
+      const projects = await api.all(`/projects?simple=true&archived=false${filter}`);
+      report.total = projects.length;
+      liveLog(`Scanning ${projects.length} project${projects.length === 1 ? "" : "s"}`);
+      const opts = { allBranches: $("scanRefs").value === "all", wikis: $("scanWikis").checked };
+      await runPool(projects, 4, async (p) => {
+        try { await scanProject(api, p, opts, report); }
+        catch (e) {
+          if (e.name === "AbortError") throw e;
+          report.errors++;
+          liveLog(`${p.path_with_namespace}: ${e.message}`, true);
+        }
+        report.scanned++;
+        renderLiveReport(report, false);
+      });
+    }
+    renderLiveReport(report, true);
+  } catch (e) {
+    if (e.name === "AbortError") { $("liveStatus").textContent = `Stopped. ${report.scanned} project(s) scanned.`; renderLiveReport(report, true); }
+    else { $("liveStatus").textContent = explainError(e, base); liveLog(e.message, true); }
+  } finally {
+    live.controller = null;
+    $("liveRun").textContent = "Run check";
+    $("liveRun").classList.remove("stop");
+  }
+}
+
+/* ---------- Wiring ---------- */
+function init() {
+  $("liveForm").addEventListener("submit", runLiveScan);
+  Object.entries(SCRIPTS).forEach(([id, lines]) => { $(id).textContent = lines.join("\n"); });
+
+  document.querySelectorAll(".tab").forEach((tab) => tab.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach((t) => { t.setAttribute("aria-selected", String(t === tab)); $(t.dataset.panel).hidden = t !== tab; });
+  }));
+
+  $("versionInput").addEventListener("input", () => { $("exampleNote").hidden = true; update(); });
+  document.querySelectorAll("[data-ed]").forEach((b) => b.addEventListener("click", () => { state.editionTouched = true; setEdition(b.dataset.ed); update(); }));
+  $("installType").addEventListener("change", (e) => { state.install = e.target.value; store.set("cve110264-install", state.install); update(); });
+  $("publicProjects").addEventListener("change", (e) => { state.exposure = e.target.value; update(); });
+
+  document.addEventListener("click", async (e) => {
+    const btn = e.target.closest(".copy");
+    if (!btn) return;
+    const pre = $(btn.dataset.copy);
+    try { await navigator.clipboard.writeText(pre.textContent); btn.textContent = "Copied"; }
+    catch { const r = document.createRange(); r.selectNodeContents(pre); const s = getSelection(); s.removeAllRanges(); s.addRange(r); btn.textContent = "Selected"; }
+    setTimeout(() => (btn.textContent = "Copy"), 1500);
+  });
+
+  const drop = $("drop");
+  ["dragenter", "dragover"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+  ["dragleave", "drop"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
+  drop.addEventListener("drop", async (e) => scanFiles(await filesFromDrop(e.dataTransfer)));
+  $("pickDir").addEventListener("change", (e) => scanFiles(e.target.files));
+  $("pickFiles").addEventListener("change", (e) => scanFiles(e.target.files));
+
+  $("checklist").addEventListener("change", (e) => {
+    const done = store.get("cve110264-checklist", {});
+    done[e.target.dataset.id] = e.target.checked;
+    store.set("cve110264-checklist", done);
+    updateProgress();
+  });
+  $("resetChecklist").addEventListener("click", () => { store.set("cve110264-checklist", {}); renderChecklist(); });
+
+  state.install = store.get("cve110264-install", "deb");
+  $("installType").value = state.install;
+  renderChecklist();
+  update();
+}
+
+/* Walk dropped folders recursively (drag-and-drop of directories) */
+async function filesFromDrop(dt) {
+  const entries = [...dt.items].map((i) => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+  if (!entries.length) return dt.files;
+  const files = [];
+  const walk = async (entry, path) => {
+    if (entry.isFile) {
+      const f = await new Promise((res, rej) => entry.file(res, rej));
+      Object.defineProperty(f, "webkitRelativePath", { value: path + f.name });
+      files.push(f);
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      let batch;
+      do {
+        batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+        for (const child of batch) await walk(child, path + entry.name + "/");
+      } while (batch.length);
+    }
+  };
+  for (const entry of entries) await walk(entry, "");
+  return files;
+}
+
+init();
+</script>
+</body>
+</html>
