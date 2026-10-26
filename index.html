@@ -162,15 +162,21 @@ footer ul { margin: 0; padding-left: 1.1em; }
           <label class="field" for="glUrl">GitLab URL
             <input type="text" id="glUrl" placeholder="https://gitlab.example.com" inputmode="url" spellcheck="false">
           </label>
-          <label class="field" for="glToken"><span>Access token (<code>read_api</code> scope)</span>
-            <input type="password" id="glToken" placeholder="glpat-…" spellcheck="false">
+          <label class="field" for="glVersion"><span>GitLab version <span class="muted">(optional)</span></span>
+            <input type="text" id="glVersion" placeholder="e.g. 19.4.2-ee" spellcheck="false">
           </label>
         </div>
         <div class="row">
+          <label class="field" for="glToken"><span>Access token <span class="muted">(optional, <code>read_api</code> scope)</span></span>
+            <input type="password" id="glToken" placeholder="Leave empty to scan as an anonymous visitor" spellcheck="false">
+          </label>
+        </div>
+        <p class="muted" style="font-size:.84rem">Without a token the page sees exactly what an attacker without an account sees: whether public projects are visible, and any payload planted in them. GitLab hides its version from anonymous visitors, so type it above if you know it. Add a token to read the version automatically and to scan internal and private projects too.</p>
+        <div class="row">
           <label class="field" for="scanScope">Repositories to scan
             <select id="scanScope">
-              <option value="public">Public projects only (the no-login path)</option>
-              <option value="all">Every project this token can see</option>
+              <option value="public">Public projects, as an anonymous visitor would see them</option>
+              <option value="all">Every project the token can see (needs a token)</option>
               <option value="none">None, just version and exposure</option>
             </select>
           </label>
@@ -184,7 +190,7 @@ footer ul { margin: 0; padding-left: 1.1em; }
         <label class="check" for="scanWikis"><input type="checkbox" id="scanWikis" checked> Also scan project wikis (they render Org too)</label>
         <div class="row" style="align-items:center">
           <button type="submit" class="btn" id="liveRun" style="flex:none">Run check</button>
-          <span class="status-line muted" id="liveStatus">Requests go from your browser straight to your server. The token is never saved.</span>
+          <span class="status-line muted" id="liveStatus">Requests go from your browser straight to your server. A token, if you give one, is never saved.</span>
         </div>
       </form>
       <div class="results" id="liveResults"></div>
@@ -534,17 +540,18 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
 /* ---------- Rendering ---------- */
 function renderVerdict(parsed, result) {
   const box = $("verdict");
-  if (!parsed) {
-    box.className = "verdict warn";
-    box.innerHTML = `<span class="eyebrow">Verdict</span><div class="status">No version found</div>
-      <p>Paste something like <code>19.4.2-ee</code>, the contents of the VERSION file, or the probe output.</p>`;
-    return;
-  }
   const exposureText = {
     yes: '<span class="pill bad">Public projects visible without login</span> The unauthenticated path is open.',
     no: '<span class="pill ok">No public projects</span> The anonymous path is closed; signed-in users can still reach the renderer.',
-    unknown: '<span class="pill warn">Public projects unknown</span> Run the probe or check Admin area → Projects.',
+    unknown: '<span class="pill warn">Public projects unknown</span> Run a live scan or check Admin area → Projects.',
   }[state.exposure];
+  if (!parsed) {
+    box.className = state.exposure === "yes" ? "verdict bad" : "verdict warn";
+    box.innerHTML = `<span class="eyebrow">Verdict</span><div class="status">Version unknown</div>
+      <p>${exposureText}</p>
+      <p>GitLab only shows its version to signed-in users. Type it in the scan form or the <i>Paste version</i> tab (for example <code>19.4.2-ee</code>), or run the scan with a token. Any version from 7.0 up to 19.5.0 without the 21 October patch is affected.</p>`;
+    return;
+  }
   const urgent = result.level === "bad" && state.exposure === "yes";
   box.className = `verdict ${result.level}`;
   box.innerHTML = `
@@ -639,15 +646,29 @@ class GitLabError extends Error {
 }
 
 /** Minimal GitLab API client. CORS is allowed on /api/* by GitLab for any origin. */
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new DOMException("Aborted", "AbortError")); }, { once: true });
+  });
+}
+
+const MAX_RATE_LIMIT_RETRIES = 3;
+
+/** Minimal GitLab API client; an empty token means anonymous requests. */
 function gitlabClient(baseUrl, token, signal) {
   const root = baseUrl.replace(/\/+$/, "") + "/api/v4";
-  async function request(path, { auth = true, as = "json" } = {}) {
+  async function request(path, { auth = true, as = "json" } = {}, attempt = 0) {
     let res;
     try {
       res = await fetch(root + path, { headers: auth && token ? { "PRIVATE-TOKEN": token } : {}, signal, credentials: "omit" });
     } catch (e) {
       if (e.name === "AbortError") throw e;
       throw new GitLabError("Could not reach the server (network, https or CORS problem)", 0);
+    }
+    if (res.status === 429 && attempt < MAX_RATE_LIMIT_RETRIES) {
+      await sleep((Number(res.headers.get("Retry-After")) || 5 * (attempt + 1)) * 1000, signal);
+      return request(path, { auth, as }, attempt + 1);
     }
     if (!res.ok) throw new GitLabError(`HTTP ${res.status} on ${path.split("?")[0]}`, res.status);
     return as === "text" ? res.text() : res.json();
@@ -681,7 +702,11 @@ async function scanProject(api, project, opts, report) {
   for (const ref of refs) {
     let tree;
     try { tree = await api.all(`/projects/${id}/repository/tree?recursive=true&ref=${enc(ref)}`); }
-    catch (e) { if (e.status === 404) continue; throw e; }
+    catch (e) {
+      if (e.status === 404) continue;                       // empty repository or missing ref
+      if (e.status === 403 || e.status === 401) { report.hidden++; return; } // repository not visible to this caller
+      throw e;
+    }
     const orgFiles = tree.filter((t) => t.type === "blob" && /\.org$/i.test(t.path));
     for (const file of orgFiles) {
       const text = await api.request(`/projects/${id}/repository/files/${enc(file.path)}/raw?ref=${enc(ref)}`, { as: "text" });
@@ -718,8 +743,9 @@ function liveLog(msg, isError = false) {
 }
 
 function renderLiveReport(report, done) {
-  const { scanned, total, orgFiles, hits, errors } = report;
-  const head = total === null ? "" : `Projects ${scanned}/${total} · .org files ${orgFiles} · errors ${errors}`;
+  const { scanned, total, orgFiles, hits, errors, hidden } = report;
+  const head = total === null ? "" :
+    `Projects ${scanned}/${total} · .org files ${orgFiles}${hidden ? ` · code hidden in ${hidden}` : ""} · errors ${errors}`;
   $("liveStatus").textContent = done ? `Done. ${head}` : head || "Working…";
   const verdict = !done ? "" : hits.length
     ? `<p><span class="pill bad">${hits.length} suspicious line${hits.length > 1 ? "s" : ""} found</span> Treat these projects as hostile until reviewed.</p>`
@@ -728,9 +754,13 @@ function renderLiveReport(report, done) {
     `<div class="hit"><a href="${esc(h.url)}" target="_blank" rel="noopener noreferrer">${esc(h.where)} · ${esc(h.path)}:${h.line}</a> · ${h.len.toLocaleString()} chars</div>`).join("");
 }
 
-function explainError(e, base) {
-  if (e.status === 401) return "The token was rejected. Check it is valid and has the read_api scope.";
-  if (e.status === 403) return "The token is not allowed to read this. Use a token with the read_api scope.";
+function explainError(e, base, hasToken) {
+  if (e.status === 401 || e.status === 403) {
+    return hasToken
+      ? "The token was rejected or lacks access. Check it is valid and has the read_api scope."
+      : "The server refused anonymous API access, so an attacker without an account can't list projects this way. Add a token for a deeper scan.";
+  }
+  if (e.status === 429) return "The server is rate-limiting requests. Wait a few minutes, scan the default branch only, or add a token (higher limits).";
   if (e.status === 0) {
     if (location.protocol === "https:" && base.startsWith("http:")) return "Your server uses http. Browsers block http requests from an https page. Use the probe script instead.";
     return "Could not reach the server. Check the URL, that you are on the right network or VPN, and that your browser allowed local network access. Otherwise use the probe script.";
@@ -743,36 +773,53 @@ async function runLiveScan(event) {
   if (live.controller) { live.controller.abort(); return; }
   const base = $("glUrl").value.trim().replace(/\/+$/, "");
   const token = $("glToken").value.trim();
+  const manualVersion = $("glVersion").value.trim();
+  const scope = $("scanScope").value;
   if (!/^https?:\/\/[^\s/]+/i.test(base)) { $("liveStatus").textContent = "Enter the full URL, starting with https://"; return; }
-  if (!token) { $("liveStatus").textContent = "Enter an access token with the read_api scope."; return; }
+  if (scope === "all" && !token) { $("liveStatus").textContent = "Scanning every project needs a token. Add one, or choose public projects."; return; }
+  if (manualVersion && !parseVersion(manualVersion)) { $("liveStatus").textContent = "The version should look like 19.4.2 or 19.4.2-ee."; return; }
 
   live.controller = new AbortController();
   const api = gitlabClient(base, token, live.controller.signal);
-  const report = { scanned: 0, total: null, orgFiles: 0, hits: [], errors: 0 };
+  const report = { scanned: 0, total: null, orgFiles: 0, hits: [], errors: 0, hidden: 0 };
   $("liveRun").textContent = "Stop";
   $("liveRun").classList.add("stop");
   $("liveLog").textContent = "";
   $("liveResults").innerHTML = "";
-  $("liveStatus").textContent = "Reading version…";
+  liveLog(token ? "Mode: token (deep scan)" : "Mode: anonymous (what an attacker without an account sees)");
 
   try {
-    const version = await api.request("/version");
-    liveLog(`Version: ${version.version}`);
+    // 1. Version: from the API with a token, otherwise from what the user typed.
+    let versionLine = manualVersion ? `VERSION=${manualVersion}` : "";
+    if (token) {
+      $("liveStatus").textContent = "Reading version…";
+      const version = await api.request("/version");
+      versionLine = `VERSION_JSON=${JSON.stringify(version)}`;
+      liveLog(`Version: ${version.version}`);
+    } else {
+      liveLog(manualVersion ? `Version (entered): ${manualVersion}` : "Version: hidden from anonymous visitors (type it in the form to get a verdict)");
+    }
+
+    // 2. Exposure: always checked without a token, like an attacker would.
+    $("liveStatus").textContent = "Checking anonymous access…";
     let sample = "unknown";
     try {
       const anon = await api.request("/projects?visibility=public&per_page=1&simple=true", { auth: false });
       sample = anon.length ? "[{" : "[]";
       liveLog(anon.length ? "Anonymous visitors CAN see public projects" : "Anonymous visitors see no public projects");
-    } catch (e) { liveLog(`Anonymous check failed: ${explainError(e, base)}`, true); }
-    $("versionInput").value = `VERSION_JSON=${JSON.stringify(version)}\nANON_PUBLIC_SAMPLE=${sample}`;
+    } catch (e) {
+      if (e.status === 401 || e.status === 403) { sample = "[]"; liveLog("Anonymous API access is refused: no public projects reachable this way"); }
+      else liveLog(`Anonymous check failed: ${explainError(e, base, false)}`, true);
+    }
+    $("versionInput").value = [versionLine, `ANON_PUBLIC_SAMPLE=${sample}`].filter(Boolean).join("\n");
     $("exampleNote").hidden = true;
     update();
 
-    const scope = $("scanScope").value;
-    if (scope !== "none") {
+    // 3. Payload scan.
+    if (scope !== "none" && !(scope === "public" && sample === "[]" && !token)) {
       $("liveStatus").textContent = "Listing projects…";
       const filter = scope === "public" ? "&visibility=public" : "";
-      const projects = await api.all(`/projects?simple=true&archived=false${filter}`);
+      const projects = await api.all(`/projects?simple=true${filter}`);
       report.total = projects.length;
       liveLog(`Scanning ${projects.length} project${projects.length === 1 ? "" : "s"}`);
       const opts = { allBranches: $("scanRefs").value === "all", wikis: $("scanWikis").checked };
@@ -786,11 +833,13 @@ async function runLiveScan(event) {
         report.scanned++;
         renderLiveReport(report, false);
       });
+    } else if (scope !== "none") {
+      liveLog("No public projects are visible anonymously, so there is nothing for an attacker to plant a payload in.");
     }
     renderLiveReport(report, true);
   } catch (e) {
     if (e.name === "AbortError") { $("liveStatus").textContent = `Stopped. ${report.scanned} project(s) scanned.`; renderLiveReport(report, true); }
-    else { $("liveStatus").textContent = explainError(e, base); liveLog(e.message, true); }
+    else { $("liveStatus").textContent = explainError(e, base, Boolean(token)); liveLog(e.message, true); }
   } finally {
     live.controller = null;
     $("liveRun").textContent = "Run check";
