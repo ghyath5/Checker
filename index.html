@@ -137,7 +137,7 @@ footer ul { margin: 0; padding-left: 1.1em; }
   <header>
     <span class="eyebrow">Self-managed GitLab · independent checker</span>
     <h1>Is your GitLab server exposed to CVE-2026-110264?</h1>
-    <p class="muted">An integer overflow in Ruby's regex engine (Onigmo), reachable without login through GitLab's Org-mode (<code>.org</code>) renderer. Scan your server live or paste its version to get a verdict and the exact steps to fix it. This page is static: your token and results go only between your browser and your GitLab.</p>
+    <p class="muted">An integer overflow in Ruby's own regex engine (Onigmo). Any place where GitLab turns attacker text into a regular expression can reach it; the one route made public so far is GitLab's Org-mode (<code>.org</code>) renderer, reachable without login. Your version decides whether you are affected; the scans look for planted payloads. This page is static: your token and results go only between your browser and your GitLab.</p>
     <div class="facts">
       <span class="chip bad">CVSS 10.0 · unauthenticated RCE</span>
       <span class="chip">Fixed 21 Oct 2026</span>
@@ -279,7 +279,12 @@ footer ul { margin: 0; padding-left: 1.1em; }
   <!-- 5. Scan -->
   <section class="step" aria-labelledby="s5">
     <div class="step-head"><span class="step-num">04</span><h2 id="s5">Look for planted payloads</h2></div>
-    <p>A payload is a <code>#+TODO:</code> (or <code>SEQ_TODO</code> / <code>TYP_TODO</code>) line with a huge keyword; the overflow needs over 32,767 repeats. Anything over 500 characters is worth a look. Every scan here matches upper or lower case and indented lines, which is broader than GitLab's own published check.</p>
+    <p>The bug fires when a regular expression with a huge number of repeats (over 32,767) is compiled. The scans flag two things:</p>
+    <ul class="notes">
+      <li><span class="pill bad">Known payload</span> a <code>#+TODO:</code>, <code>#+SEQ_TODO:</code> or <code>#+TYP_TODO:</code> line over 500 characters in an Org file. This is the route GitLab's detection rule describes. Upper or lower case and indented lines both count.</li>
+      <li><span class="pill warn">Review</span> the same signature anywhere else in Org files and in GitLab CI config files (<code>.gitlab-ci.yml</code>, <code>*.gitlab-ci.yml</code>, <code>.gitlab/**/*.yml</code>): one short piece of text repeated 500+ times, or a line over 32,767 characters. CI config is where the same researcher reached the same regex engine in the 12 October CVE.</li>
+    </ul>
+    <p><b>A clean scan does not make an unpatched server safe.</b> GitLab has not published every route to the bug, and nothing outside your server can test routes nobody has described. Only upgrading closes it.</p>
 
     <h3>On the server: branches, tags and merge request refs of every repository, wiki and snippet</h3>
     <div class="code-block"><pre id="serverScan"></pre><button class="copy" data-copy="serverScan">Copy</button></div>
@@ -290,12 +295,12 @@ footer ul { margin: 0; padding-left: 1.1em; }
 
     <h3>Or drop a folder here</h3>
     <div class="drop" id="drop">
-      <p>Drag a repository folder or <code>.org</code> files here. They are read in this tab only.</p>
+      <p>Drag a repository folder, <code>.org</code> files or CI config files here. They are read in this tab only.</p>
       <div class="row" style="gap:8px">
         <label class="btn ghost" for="pickDir" style="flex:none">Choose folder</label>
         <input type="file" id="pickDir" webkitdirectory multiple hidden>
         <label class="btn ghost" for="pickFiles" style="flex:none">Choose files</label>
-        <input type="file" id="pickFiles" accept=".org" multiple hidden>
+        <input type="file" id="pickFiles" accept=".org,.yml,.yaml" multiple hidden>
       </div>
       <div class="results" id="scanResults"></div>
     </div>
@@ -488,23 +493,42 @@ const SCRIPTS = {
     "done",
   ],
   serverScan: [
-    "# Linux package defaults. Read-only. Case-insensitive, allows indentation.",
+    "#!/usr/bin/env bash",
+    "# Linux package defaults. Read-only. Run as root.",
     "REPOS=/var/opt/gitlab/git-data/repositories",
     "GIT=/opt/gitlab/embedded/bin/git",
-    "PATTERN='^[[:space:]]*#\\+(TODO|SEQ_TODO|TYP_TODO):.{500,}'",
+    "RUN=(sudo -u git)",
+    "KNOWN='^[[:space:]]*#\\+(TODO|SEQ_TODO|TYP_TODO):.{500,}'",
+    "LONG='.{2000,}'",
     "",
-    "sudo find \"$REPOS\" -type d -name '*.git' -prune | while read -r repo; do",
-    "  sudo -u git \"$GIT\" -C \"$repo\" for-each-ref --format='%(objectname)' \\",
-    "      refs/heads refs/tags refs/merge-requests | sort -u \\",
-    "    | xargs -r -n 200 sudo -u git \"$GIT\" -C \"$repo\" grep -l -i -E \"$PATTERN\" -- '*.org' '*.ORG' 2>/dev/null \\",
-    "    | sed 's|^[0-9a-f]*:||' | sort -u | sed \"s|^|$repo  |\"",
+    "# scan_repo <repo> <pattern> <pathspec>... : prints matching files across branches, tags and MR refs",
+    "scan_repo() {",
+    "  local repo=$1 pattern=$2 i refs; shift 2",
+    "  mapfile -t refs < <(\"${RUN[@]}\" \"$GIT\" -C \"$repo\" for-each-ref --format='%(objectname)' \\",
+    "    refs/heads refs/tags refs/merge-requests | sort -u)",
+    "  for ((i = 0; i < ${#refs[@]}; i += 200)); do",
+    "    \"${RUN[@]}\" \"$GIT\" -C \"$repo\" grep -l -i -E \"$pattern\" \"${refs[@]:i:200}\" -- \"$@\" 2>/dev/null",
+    "  done | sed 's|^[0-9a-f]*:||' | sort -u | sed \"s|^|$repo  |\"",
+    "}",
+    "",
+    "find \"$REPOS\" -type d -name '*.git' -prune | while read -r repo; do",
+    "  scan_repo \"$repo\" \"$KNOWN\" '*.org' | sed 's|^|KNOWN   |'",
+    "  scan_repo \"$repo\" \"$LONG\" '*.org' '*gitlab-ci.yml' '*gitlab-ci.yaml' '.gitlab/*.yml' '.gitlab/*.yaml' \\",
+    "    | sed 's|^|REVIEW  |'",
     "done",
+    "",
+    "# KNOWN  = the published Org-mode payload. REVIEW = a line over 2,000 characters; open it and look.",
     "",
     "# Map a hashed path (@hashed/ab/cd/<hash>) back to its project:",
     "# sudo gitlab-rails runner 'puts ProjectRepository.find_by(disk_path: \"@hashed/ab/cd/<hash>\")&.project&.full_path'",
   ],
   rgScan: [
+    "# Known payload",
     "rg -l -i --glob '**/*.org' '^\\s*\\#\\+(TODO|SEQ_TODO|TYP_TODO):.{500,}'",
+    "",
+    "# Review: lines over 2,000 characters in Org and CI config files",
+    "rg --files -uu -g '*.org' -g '*gitlab-ci.y*ml' -g '.gitlab/**/*.y*ml' \\",
+    "  | xargs -r awk 'length > 2000 { print FILENAME \":\" FNR \" (\" length \" chars)\"; nextfile }'",
   ],
   logScan: [
     "# Org-mode render timeouts (look for bursts from one client)",
@@ -522,7 +546,7 @@ const CHECKLIST = [
   ["upgrade", "Install the fixed release for each server"],
   ["verify", "Confirm the new version on each server"],
   ["visibility", "Restrict or remove public projects until every server is patched"],
-  ["scan", "Scan repositories and wikis for oversized #+TODO: lines"],
+  ["scan", "Scan repositories and wikis for known payloads and review anything flagged"],
   ["rules", "Load GitLab's two TLDR detection rules and run them over recent logs"],
   ["rotate", "If anything looks wrong: treat the server as compromised and rotate CI/CD variables, runner tokens, deploy keys and access tokens"],
   ["ruby", "Patch other Ruby apps that build regexes from user input (Ruby 4.0.9, 3.4.12, 3.3.13)"],
@@ -562,7 +586,8 @@ function renderVerdict(parsed, result) {
       <dt>Fixed release</dt><dd>${result.target ? esc(result.target) : "—"}</dd>
     </dl>
     ${result.level !== "ok" || state.exposure === "yes" ? `<p>${exposureText}</p>` : ""}
-    <ul class="notes">${result.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>`;
+    <ul class="notes">${result.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>
+    ${result.level === "bad" ? "<p><b>Upgrade even if every scan comes back clean.</b> The scans can only find the published payload; other routes to the same bug may exist.</p>" : ""}`;
 }
 
 function renderFix(parsed, result) {
@@ -618,26 +643,75 @@ function update() {
   renderFixTable(parsed);
 }
 
-/* ---------- Local .org scanner ---------- */
-const PAYLOAD = /^[ \t]*#\+(TODO|SEQ_TODO|TYP_TODO):.{500,}/i;
-/** Returns [{ line, len }] for every suspicious line in an Org document. */
-function findPayloadLines(text) {
+/* ---------- Payload detection ---------- */
+// Published route: an Org TODO keyword line with a huge keyword (GitLab's detection rule).
+const KNOWN_PAYLOAD = /^[ \t]*#\+(TODO|SEQ_TODO|TYP_TODO):.{500,}/i;
+// Signature of this bug class: one short unit repeated hundreds of times, as a "many repeats" pattern needs.
+const REPEAT_RUN = /(.{1,16}?)\1{499,}/;
+const MIN_LINE_FOR_REPEAT = 500;
+const OVERFLOW_LENGTH = 32768;
+const MAX_FILE_BYTES = 50 * 1024 * 1024;
+
+/** Which files GitLab is known to compile regexes from: Org documents and CI config. */
+function fileKind(path) {
+  if (/\.org$/i.test(path)) return "org";
+  if (/(^|\/)([^/]*\.)?gitlab-ci\.ya?ml$/i.test(path) || /(^|\/)\.gitlab\/.+\.ya?ml$/i.test(path)) return "ci";
+  return null;
+}
+
+const shortUnit = (s) => JSON.stringify(s.length > 12 ? s.slice(0, 12) + "…" : s);
+
+/** Returns [{ line, len, level: "known"|"review", reason }] for every flagged line. */
+function analyseText(text, kind) {
   const hits = [];
-  text.split(/\r?\n/).forEach((l, i) => { if (PAYLOAD.test(l)) hits.push({ line: i + 1, len: l.length }); });
+  text.split(/\r?\n/).forEach((line, i) => {
+    const at = { line: i + 1, len: line.length };
+    if (kind === "org" && KNOWN_PAYLOAD.test(line)) {
+      hits.push({ ...at, level: "known", reason: "Org TODO keyword payload" });
+      return;
+    }
+    if (line.length < MIN_LINE_FOR_REPEAT) return;
+    const run = line.match(REPEAT_RUN);
+    if (run) {
+      const times = Math.floor(run[0].length / run[1].length);
+      hits.push({ ...at, level: "review", reason: `${shortUnit(run[1])} repeated ${times.toLocaleString()} times` });
+    } else if (line.length >= OVERFLOW_LENGTH) {
+      hits.push({ ...at, level: "review", reason: "line longer than 32,767 characters" });
+    }
+  });
   return hits;
 }
+
+function hitBadge(level) {
+  return level === "known" ? '<span class="pill bad">known payload</span>' : '<span class="pill warn">review</span>';
+}
+
+function summariseHits(hits) {
+  const known = hits.filter((h) => h.level === "known").length;
+  const review = hits.length - known;
+  const parts = [];
+  if (known) parts.push(`<span class="pill bad">${known} known payload${known > 1 ? "s" : ""}</span>`);
+  if (review) parts.push(`<span class="pill warn">${review} to review</span>`);
+  const advice = known ? "Treat these projects as hostile and patch now." : "Open each line and check whether it looks deliberate.";
+  return `<p>${parts.join(" ")} ${advice}</p>`;
+}
+
+const NOT_PROOF = "This only rules out the published payload; it does not make an unpatched server safe.";
+
 async function scanFiles(fileList) {
-  const files = [...fileList].filter((f) => f.name.toLowerCase().endsWith(".org") && f.size < 50 * 1024 * 1024);
+  const files = [...fileList]
+    .map((f) => ({ f, path: f.webkitRelativePath || f.name }))
+    .filter(({ f, path }) => fileKind(path) && f.size < MAX_FILE_BYTES);
   const out = $("scanResults");
-  if (!files.length) { out.innerHTML = `<p class="muted">No .org files found in that selection.</p>`; return; }
+  if (!files.length) { out.innerHTML = `<p class="muted">No Org or CI config files found in that selection.</p>`; return; }
   const hits = [];
-  for (const f of files) {
-    findPayloadLines(await f.text()).forEach((h) => hits.push({ path: f.webkitRelativePath || f.name, ...h }));
+  for (const { f, path } of files) {
+    analyseText(await f.text(), fileKind(path)).forEach((h) => hits.push({ path, ...h }));
   }
   out.innerHTML = hits.length
-    ? `<p><span class="pill bad">${hits.length} suspicious line${hits.length > 1 ? "s" : ""}</span> in ${files.length} .org file${files.length > 1 ? "s" : ""}:</p>`
-      + hits.map((h) => `<div class="hit">${esc(h.path)}:${h.line} · ${h.len.toLocaleString()} chars</div>`).join("")
-    : `<p><span class="pill ok">Clean</span> ${files.length} .org file${files.length > 1 ? "s" : ""} scanned, no oversized TODO lines.</p>`;
+    ? summariseHits(hits) + hits.map((h) =>
+        `<div class="hit">${hitBadge(h.level)} ${esc(h.path)}:${h.line} · ${h.len.toLocaleString()} chars · ${esc(h.reason)}</div>`).join("")
+    : `<p><span class="pill ok">No known payload</span> in ${files.length} Org/CI file${files.length > 1 ? "s" : ""}. ${NOT_PROOF}</p>`;
 }
 
 /* ---------- Live scan via the GitLab REST API ---------- */
@@ -722,7 +796,7 @@ async function listTree(api, id, ref) {
 /** Scans one project and returns a one-line summary of what it saw, so a clean result can be trusted. */
 async function scanProject(api, project, opts, report) {
   const id = project.id;
-  const stats = { refs: 0, files: 0, org: 0, note: "" };
+  const stats = { refs: 0, files: 0, checked: 0, note: "" };
 
   if (project.default_branch) {
     let refs = [project.default_branch];
@@ -741,10 +815,10 @@ async function scanProject(api, project, opts, report) {
       stats.refs++;
       const blobs = tree.filter((t) => t.type === "blob");
       stats.files += blobs.length;
-      for (const file of blobs.filter((t) => /\.org$/i.test(t.path))) {
+      for (const file of blobs.filter((t) => fileKind(t.path))) {
         const text = await api.request(`/projects/${id}/repository/files/${enc(file.path)}/raw?ref=${enc(ref)}`, { as: "text" });
-        stats.org++;
-        findPayloadLines(text).forEach((h) => report.hits.push({
+        stats.checked++;
+        analyseText(text, fileKind(file.path)).forEach((h) => report.hits.push({
           where: `${project.path_with_namespace} @ ${ref}`, path: file.path, ...h,
           url: `${project.web_url}/-/blob/${enc(ref)}/${file.path.split("/").map(enc).join("/")}#L${h.line}`,
         }));
@@ -760,8 +834,8 @@ async function scanProject(api, project, opts, report) {
     try { pages = await api.request(`/projects/${id}/wikis?with_content=1`); }
     catch (e) { if (!isDenied(e) && e.status !== 404) throw e; }
     for (const p of pages.filter((pg) => pg.format === "org")) {
-      stats.org++;
-      findPayloadLines(p.content || "").forEach((h) => report.hits.push({
+      stats.checked++;
+      analyseText(p.content || "", "org").forEach((h) => report.hits.push({
         where: `${project.path_with_namespace} (wiki)`, path: p.slug, ...h, url: `${project.web_url}/-/wikis/${p.slug}`,
       }));
     }
@@ -769,9 +843,9 @@ async function scanProject(api, project, opts, report) {
   }
 
   report.files += stats.files;
-  report.orgFiles += stats.org;
+  report.checked += stats.checked;
   if (stats.note) report.hidden++;
-  const parts = [`${stats.refs} branch${stats.refs === 1 ? "" : "es"}`, `${stats.files.toLocaleString()} files`, `${stats.org} .org`];
+  const parts = [`${stats.refs} branch${stats.refs === 1 ? "" : "es"}`, `${stats.files.toLocaleString()} files`, `${stats.checked} Org/CI checked`];
   if (opts.wikis) parts.push(`${stats.wikiPages} wiki page${stats.wikiPages === 1 ? "" : "s"}`);
   liveLog(`${project.path_with_namespace}: ${stats.note ? `skipped, ${stats.note}` : parts.join(" · ")}`);
 }
@@ -789,18 +863,18 @@ function liveLog(msg, isError = false) {
 }
 
 function renderLiveReport(report, done) {
-  const { scanned, total, files, orgFiles, hits, errors, hidden } = report;
+  const { scanned, total, files, checked, hits, errors, hidden } = report;
+  const plural = (n, w) => `${n.toLocaleString()} ${w}${n === 1 ? "" : "s"}`;
   const head = total === null ? "" :
-    `Projects ${scanned}/${total} · files listed ${files.toLocaleString()} · .org files ${orgFiles}${hidden ? ` · skipped ${hidden}` : ""} · errors ${errors}`;
+    `Projects ${scanned}/${total} · files listed ${files.toLocaleString()} · Org/CI checked ${checked}${hidden ? ` · skipped ${hidden}` : ""} · errors ${errors}`;
   $("liveStatus").textContent = done ? `Done. ${head}` : head || "Working…";
-  const verdict = !done ? "" : hits.length
-    ? `<p><span class="pill bad">${hits.length} suspicious line${hits.length > 1 ? "s" : ""} found</span> Treat these projects as hostile until reviewed.</p>`
+  const verdict = !done ? "" : hits.length ? summariseHits(hits)
     : !total ? ""
-    : orgFiles ? `<p><span class="pill ok">No payloads found</span> in ${orgFiles} .org file${orgFiles === 1 ? "" : "s"} across ${scanned} project${scanned === 1 ? "" : "s"}.</p>`
-    : files ? `<p><span class="pill ok">No .org files</span> in ${files.toLocaleString()} files across ${scanned} project${scanned === 1 ? "" : "s"}, so there is nothing planted for GitLab to render. See the log for each project.</p>`
+    : checked ? `<p><span class="pill ok">No known payload</span> in ${plural(checked, "Org/CI file")} across ${plural(scanned, "project")}. ${NOT_PROOF}</p>`
+    : files ? `<p><span class="pill ok">No Org or CI files</span> among ${plural(files, "file")} in ${plural(scanned, "project")}, so the published payload has nowhere to sit. ${NOT_PROOF}</p>`
     : `<p><span class="pill warn">Nothing readable</span> No repository files were visible to this caller. See the log for why each project was skipped.</p>`;
   $("liveResults").innerHTML = verdict + hits.map((h) =>
-    `<div class="hit"><a href="${esc(h.url)}" target="_blank" rel="noopener noreferrer">${esc(h.where)} · ${esc(h.path)}:${h.line}</a> · ${h.len.toLocaleString()} chars</div>`).join("");
+    `<div class="hit">${hitBadge(h.level)} <a href="${esc(h.url)}" target="_blank" rel="noopener noreferrer">${esc(h.where)} · ${esc(h.path)}:${h.line}</a> · ${h.len.toLocaleString()} chars · ${esc(h.reason)}</div>`).join("");
 }
 
 function explainError(e, base, hasToken) {
@@ -830,7 +904,7 @@ async function runLiveScan(event) {
 
   live.controller = new AbortController();
   const api = gitlabClient(base, token, live.controller.signal);
-  const report = { scanned: 0, total: null, files: 0, orgFiles: 0, hits: [], errors: 0, hidden: 0 };
+  const report = { scanned: 0, total: null, files: 0, checked: 0, hits: [], errors: 0, hidden: 0 };
   $("liveRun").textContent = "Stop";
   $("liveRun").classList.add("stop");
   $("liveLog").textContent = "";
