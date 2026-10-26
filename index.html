@@ -693,41 +693,87 @@ async function runPool(items, limit, worker) {
 
 const enc = encodeURIComponent;
 
+const isDenied = (e) => e.status === 401 || e.status === 403;
+const TREE_PAGE = 100;
+
+/**
+ * Lists every entry of a repository tree. Uses keyset pagination (page_token = last entry id),
+ * which has no depth limit on large repositories; falls back to page numbers on old servers.
+ */
+async function listTree(api, id, ref) {
+  const base = `/projects/${id}/repository/tree?recursive=true&ref=${enc(ref)}&per_page=${TREE_PAGE}`;
+  const out = [];
+  try {
+    let token = null;
+    for (;;) {
+      const page = await api.request(`${base}&pagination=keyset${token ? `&page_token=${enc(token)}` : ""}`);
+      out.push(...page);
+      if (page.length < TREE_PAGE) return out;
+      const lastId = page[page.length - 1].id;
+      if (lastId === token) return out;   // server ignored page_token; avoid looping forever
+      token = lastId;
+    }
+  } catch (e) {
+    if (e.status !== 400) throw e;        // 400 = keyset not supported here
+    return api.all(`/projects/${id}/repository/tree?recursive=true&ref=${enc(ref)}`);
+  }
+}
+
+/** Scans one project and returns a one-line summary of what it saw, so a clean result can be trusted. */
 async function scanProject(api, project, opts, report) {
   const id = project.id;
-  if (!project.default_branch) return;
-  const refs = opts.allBranches
-    ? (await api.all(`/projects/${id}/repository/branches`)).map((b) => b.name)
-    : [project.default_branch];
-  for (const ref of refs) {
-    let tree;
-    try { tree = await api.all(`/projects/${id}/repository/tree?recursive=true&ref=${enc(ref)}`); }
-    catch (e) {
-      if (e.status === 404) continue;                       // empty repository or missing ref
-      if (e.status === 403 || e.status === 401) { report.hidden++; return; } // repository not visible to this caller
-      throw e;
+  const stats = { refs: 0, files: 0, org: 0, note: "" };
+
+  if (project.default_branch) {
+    let refs = [project.default_branch];
+    if (opts.allBranches) {
+      try { refs = (await api.all(`/projects/${id}/repository/branches`)).map((b) => b.name); }
+      catch (e) { if (!isDenied(e)) throw e; }
     }
-    const orgFiles = tree.filter((t) => t.type === "blob" && /\.org$/i.test(t.path));
-    for (const file of orgFiles) {
-      const text = await api.request(`/projects/${id}/repository/files/${enc(file.path)}/raw?ref=${enc(ref)}`, { as: "text" });
-      report.orgFiles++;
-      findPayloadLines(text).forEach((h) => report.hits.push({
-        where: `${project.path_with_namespace} @ ${ref}`, path: file.path, ...h,
-        url: `${project.web_url}/-/blob/${enc(ref)}/${file.path.split("/").map(enc).join("/")}#L${h.line}`,
-      }));
+    for (const ref of refs) {
+      let tree;
+      try { tree = await listTree(api, id, ref); }
+      catch (e) {
+        if (e.status === 404) continue;                                        // empty repository or missing ref
+        if (isDenied(e)) { stats.note = "code is hidden from this caller"; break; }
+        throw e;
+      }
+      stats.refs++;
+      const blobs = tree.filter((t) => t.type === "blob");
+      stats.files += blobs.length;
+      for (const file of blobs.filter((t) => /\.org$/i.test(t.path))) {
+        const text = await api.request(`/projects/${id}/repository/files/${enc(file.path)}/raw?ref=${enc(ref)}`, { as: "text" });
+        stats.org++;
+        findPayloadLines(text).forEach((h) => report.hits.push({
+          where: `${project.path_with_namespace} @ ${ref}`, path: file.path, ...h,
+          url: `${project.web_url}/-/blob/${enc(ref)}/${file.path.split("/").map(enc).join("/")}#L${h.line}`,
+        }));
+      }
     }
+  } else {
+    // GitLab leaves default_branch out when the repository is empty or its code is members-only.
+    stats.note = "no repository visible (empty, or code restricted to members)";
   }
+
   if (opts.wikis) {
     let pages = [];
     try { pages = await api.request(`/projects/${id}/wikis?with_content=1`); }
-    catch (e) { if (![403, 404].includes(e.status)) throw e; }
+    catch (e) { if (!isDenied(e) && e.status !== 404) throw e; }
     for (const p of pages.filter((pg) => pg.format === "org")) {
-      report.orgFiles++;
+      stats.org++;
       findPayloadLines(p.content || "").forEach((h) => report.hits.push({
         where: `${project.path_with_namespace} (wiki)`, path: p.slug, ...h, url: `${project.web_url}/-/wikis/${p.slug}`,
       }));
     }
+    stats.wikiPages = pages.length;
   }
+
+  report.files += stats.files;
+  report.orgFiles += stats.org;
+  if (stats.note) report.hidden++;
+  const parts = [`${stats.refs} branch${stats.refs === 1 ? "" : "es"}`, `${stats.files.toLocaleString()} files`, `${stats.org} .org`];
+  if (opts.wikis) parts.push(`${stats.wikiPages} wiki page${stats.wikiPages === 1 ? "" : "s"}`);
+  liveLog(`${project.path_with_namespace}: ${stats.note ? `skipped, ${stats.note}` : parts.join(" · ")}`);
 }
 
 const live = { controller: null };
@@ -743,13 +789,16 @@ function liveLog(msg, isError = false) {
 }
 
 function renderLiveReport(report, done) {
-  const { scanned, total, orgFiles, hits, errors, hidden } = report;
+  const { scanned, total, files, orgFiles, hits, errors, hidden } = report;
   const head = total === null ? "" :
-    `Projects ${scanned}/${total} · .org files ${orgFiles}${hidden ? ` · code hidden in ${hidden}` : ""} · errors ${errors}`;
+    `Projects ${scanned}/${total} · files listed ${files.toLocaleString()} · .org files ${orgFiles}${hidden ? ` · skipped ${hidden}` : ""} · errors ${errors}`;
   $("liveStatus").textContent = done ? `Done. ${head}` : head || "Working…";
   const verdict = !done ? "" : hits.length
     ? `<p><span class="pill bad">${hits.length} suspicious line${hits.length > 1 ? "s" : ""} found</span> Treat these projects as hostile until reviewed.</p>`
-    : total ? `<p><span class="pill ok">No payloads found</span> in ${orgFiles} .org file${orgFiles === 1 ? "" : "s"} across ${scanned} project${scanned === 1 ? "" : "s"}.</p>` : "";
+    : !total ? ""
+    : orgFiles ? `<p><span class="pill ok">No payloads found</span> in ${orgFiles} .org file${orgFiles === 1 ? "" : "s"} across ${scanned} project${scanned === 1 ? "" : "s"}.</p>`
+    : files ? `<p><span class="pill ok">No .org files</span> in ${files.toLocaleString()} files across ${scanned} project${scanned === 1 ? "" : "s"}, so there is nothing planted for GitLab to render. See the log for each project.</p>`
+    : `<p><span class="pill warn">Nothing readable</span> No repository files were visible to this caller. See the log for why each project was skipped.</p>`;
   $("liveResults").innerHTML = verdict + hits.map((h) =>
     `<div class="hit"><a href="${esc(h.url)}" target="_blank" rel="noopener noreferrer">${esc(h.where)} · ${esc(h.path)}:${h.line}</a> · ${h.len.toLocaleString()} chars</div>`).join("");
 }
@@ -781,7 +830,7 @@ async function runLiveScan(event) {
 
   live.controller = new AbortController();
   const api = gitlabClient(base, token, live.controller.signal);
-  const report = { scanned: 0, total: null, orgFiles: 0, hits: [], errors: 0, hidden: 0 };
+  const report = { scanned: 0, total: null, files: 0, orgFiles: 0, hits: [], errors: 0, hidden: 0 };
   $("liveRun").textContent = "Stop";
   $("liveRun").classList.add("stop");
   $("liveLog").textContent = "";
